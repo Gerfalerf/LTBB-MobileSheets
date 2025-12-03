@@ -20,11 +20,26 @@ import builtins
 import time
 from dateutil import parser
 from PyPDF2 import PdfReader
+import json
+import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+import pathlib
 
 SCOPES = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/documents.readonly"]
 
 console = Console()
 builtins.print = lambda *args, **kwargs: console.print(*args, highlight=False, **kwargs)
+arg_parser = argparse.ArgumentParser()
+arg_parser.add_argument('--cached', action="store_true")
+arg_parser.add_argument('--nocopy', action="store_true")
+args = arg_parser.parse_args()
+
+drive_lock = Lock()
+print_lock = Lock()
+def safe_print(*args, **kwargs):
+    with print_lock:
+        console.print(*args, highlight=False, **kwargs)
 
 def get_creds():
     creds = None
@@ -39,10 +54,6 @@ def get_creds():
         with open("token.json", "w") as token:
             token.write(creds.to_json())
     return creds
-
-def extract_folder_id(url):
-    match = re.search(r"/folders/([a-zA-Z0-9_-]+)", url)
-    return match.group(1) if match else None
 
 # Build Drive
 creds = get_creds()
@@ -63,18 +74,19 @@ SEASONAL_SONGS = "1M7sLr9wwvHJIfKGijRTSjC5ae1CODzbY"
 # Instrument list
 instruments = {
     'Score': ['Score'],
-    'Tuba': ['Tuba', 'Sousaphone', 'Sousa', 'Euphonium', 'Euph', 'Low Brass', 'Basses', 'Bass (Trebel Clef)'],
+    'Tuba': ['Tuba', 'Sousaphone', 'Sousa', 'Euphonium', 'Euph', 'Low Brass', 'Basses', 'Bass (Trebel Clef)', 'Bass_Line'],
     'Horn': ['Horn in F', 'F Horn', 'Mellophone', 'Horns F'],
-    'Percussion': ['Percussion', 'Drum', 'Snareline', 'Perc', 'BassDr', 'Snare', 'Congo', 'Toms', 'Quads'],
+    'Percussion': ['Percussion', 'Drum', 'Snareline', 'Perc', 'BassDr', 'Snare', 'Congo', 'Toms', 'Quads', 'Cymbal', 'Glockenspiel'],
     'Clarinet': ['Clarinet'],
     'Soprano Sax': ['Soprano'],
     'Tenor Sax': ['Tenor'],
     'Alto Sax': ['Alto'],
     'Bass Sax': ['Bass Sax', 'Bass Saxophone'],
     'Bari Sax': ['Bari'],
-    'Trumpet': ['Trumpet', 'Flugelhorn', 'Trmp'],
-    'Trombone': ['Trombone', 'Tbn', 'Trmb'],
-    'Eb Horn' : ['Eb Horn', 'Horn in Eb']
+    'Trumpet': ['Trumpet', 'Flugelhorn', 'Trmp', 'Trumplet'],
+    'Trombone': ['Trombone', 'Tbn', 'Trmb', 'Bone'],
+    'Eb Horn' : ['Eb Horn', 'Horn in Eb'],
+    'Flute' : ['Flute', 'C Woodwind']
 }
 part_folder_ids = {}
 flat_instrument_list = [sub for main in instruments for sub in instruments[main]]
@@ -82,6 +94,76 @@ instrument_lookup = {}
 for main in instruments:
     for sub in instruments[main]:
         instrument_lookup[sub.lower()] = main
+
+def save_dict(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def load_dict(path):
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def list_folders_in_folder(folder_id):
+    folder_results = drive.files().list(
+        q=f"'{folder_id}' in parents and mimeType = 'application/vnd.google-apps.folder'",
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True,
+        fields="files(id, name)"
+    ).execute()
+    return folder_results["files"]
+
+def list_pdfs_in_folder(folder_id):
+    results = drive.files().list(
+        q=f"'{folder_id}' in parents and mimeType = 'application/pdf'",
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True,
+        fields="files(id, name, size, createdTime, modifiedTime, parents)"
+    ).execute()
+    # Populate extra metadata we will need
+    for file in results['files']:
+        file['filehash'] = java_string_hashcode(file['name'])
+        dt = parser.isoparse(file['modifiedTime'])
+        file['modifiedTime'] = int(dt.timestamp() * 1000)
+        dt = parser.isoparse(file['createdTime'])
+        file['createdTime'] = int(dt.timestamp() * 1000)
+    return results["files"]
+
+IGNORE_FOLDERS = ['1. Member Drafts', '2. Seasonal Songs', '3. Warm-ups', '4. 3rd Rail Drumline', '5. Resources', '6. Recordings']
+MAX_SONGS = 99999
+def query_tree(root_ids):
+    # Get top level folders
+    top_level_folders = []
+    for root_id in root_ids:
+        top_level_folders += list_folders_in_folder(root_id)
+    top_level_folders.sort(key=lambda folder: folder['name'])
+    top_level_folders = [folder for folder in top_level_folders if folder['name'] not in IGNORE_FOLDERS]
+
+    # Get subfolders
+    folders = []
+    i = 0
+    for folder in top_level_folders:
+        print("    Querying folder [green]" + folder['name'])
+        folders += list_folders_in_folder(folder['id'])
+        i+=1
+        if i >= MAX_SONGS:
+            break
+
+    # Get PDFs
+    folders.sort(key=lambda folder: folder['name'])
+    i = 0
+    for folder in folders:
+        print("    Assembling song [green]" + folder['name'])
+        pdfs = list_pdfs_in_folder(folder["id"])
+        folder['files'] = pdfs
+        i += 1
+        if i >= MAX_SONGS:
+            break
+    
+    folders = [folder for folder in folders if 'files' in folder and len(folder['files']) > 0]
+
+    return folders
 
 def list_files(folder_id):
     query = f"'{folder_id}' in parents"
@@ -109,7 +191,7 @@ def assemble_song_parts(song):
             if instrument not in song['parts']:
                 song['parts'][instrument] = []
             song['parts'][instrument].append(file)
-            print("    [magenta]" + instrument + "[/magenta]: [green]" + file['name'])
+            print("        [magenta]" + instrument + "[/magenta]: [green]" + file['name'])
 
 no_instrument_files = []
 
@@ -118,11 +200,15 @@ def extract_instruments(file_name):
     if not file_name.endswith('.pdf'):
         return []
     instruments = []
+    file_name_sanitized = file_name.lower().replace(' ', '_').replace('.','')
     for possible_instrument in instrument_lookup:
-        if possible_instrument.replace(' ', '_') in file_name.lower().replace(' ', '_').replace('.',''):
+        if possible_instrument.replace(' ', '_') in file_name_sanitized:
             instruments.append(instrument_lookup[possible_instrument])
     if not instruments:
-        print("    [yellow]INSTRUMENT NOT FOUND: " + file_name)
+        if 'horn' in file_name_sanitized:
+            instruments.append(instrument_lookup['horn in f'])
+    if not instruments:
+        print("        [yellow]INSTRUMENT NOT FOUND: " + file_name)
         no_instrument_files.append(file_name)
     return instruments
 
@@ -136,11 +222,15 @@ def assemble_song_from_folder(folder_id):
     if not folder_contains_pdfs(folder_id):
         return None
     song = {}
-    song['title'] = get_folder_name(folder_id)
-    song['files'] = list_files(folder_id)
+    song['name'] = get_folder_name(folder_id)
+    song['files'] = list_pdfs_in_folder(folder_id)
 
     assemble_song_parts(song)
     return song
+
+def extract_folder_id(url):
+    match = re.search(r"/folders/([a-zA-Z0-9_-]+)", url)
+    return match.group(1) if match else None
 
 # Scrapes a doc and extracts all songs linked
 def scrape_song_list(doc_id):
@@ -191,34 +281,6 @@ def list_subfolders(parent_folder_id):
     
     return results.get("files", [])
 
-IGNORE_FOLDERS = ['1. Member Drafts', '2. Seasonal Songs', '3. Warm-ups', '4. 3rd Rail Drumline', '5. Resources', '6. Recordings']
-MAX_SONGS = 999999999
-
-def scrape_folder_of_songs(folder_ids):
-    print()
-    print('[cyan]Assembling song metadata from folders')
-    songs = []
-    i = 0
-    for folder_id in folder_ids:
-        for cat_folder in list_subfolders(folder_id):
-            if cat_folder['name'] in IGNORE_FOLDERS:
-                continue
-            if i > MAX_SONGS:
-                break
-            for song_folder in list_subfolders(cat_folder['id']):
-                if i > MAX_SONGS:
-                    break
-                print("Assembling song metadata [bold green]'" + song_folder['name'] + "'[/bold green] with ID '" + song_folder['id'] + "'")
-                song = assemble_song_from_folder(song_folder['id'])
-                if song:
-                    songs.append(song)
-                    i += 1
-    if len(no_instrument_files) > 0:
-        print('[yellow] Some files had no instruments:')
-        for file in no_instrument_files:
-            print(    '[yellow]' + file)
-    return songs
-
 # Drive Create folder
 def create_folder(name, parent_id=None):
     file_metadata = {
@@ -240,7 +302,7 @@ def create_folder(name, parent_id=None):
 def get_or_create_folder(name, parent_id=None):
     query = f"name = '{name}' and mimeType = 'application/vnd.google-apps.folder'"
     if parent_id:
-        query += f" and '{parent_id}' in parents"
+        query += f" and '{parent_id}' in parents and trashed = false"
 
     results = drive.files().list(
         q=query,
@@ -303,14 +365,15 @@ def get_file_metadata(file_id):
         fields="id, name, mimeType, size, createdTime, modifiedTime, md5Checksum, parents"
     ).execute()
 
+def copy_single_song(song):
+    pass
+
 def copy_songlist_into_drive(songs):
-    print()
-    print('[cyan]Copying songs into Google Drive folders')
     # Make copies of files to my Drive
     for song in songs:
         if song is None:
             print('[red]ERROR - no song!')
-        print("Copying files for [green]" + song['title'])
+        print("Copying files for [green]" + song['name'])
         for part_key in song['parts']:
             part_charts = song['parts'][part_key]
             print("    Instrument [magenta]" + part_key)
@@ -388,10 +451,35 @@ def get_page_count(path):
     reader = PdfReader(path)
     return len(reader.pages)
 
-def update_database(songs):
-    print()
-    print("[cyan]Updating databases")
+def download_pdf_for_pagecount(file, dest_path):
+    # Download the file to get the page count
+    request = None
+    with drive_lock:
+        request = drive.files().get_media(fileId=file['id'])
+    with io.FileIO(dest_path, 'wb') as fh:
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
 
+def needs_download(local_dir, filename, gd_modified_ms):
+    local_dir = pathlib.Path(local_dir)
+    local_path = local_dir / f"{filename}"
+
+    # If file does not exist, we must download it
+    if not local_path.exists():
+        return True
+
+    # Convert Drive timestamp (ms) → seconds → local float timestamp
+    gd_ts = gd_modified_ms / 1000.0
+
+    # Get local modification timestamp
+    local_ts = local_path.stat().st_mtime
+
+    # If Google Drive version is newer, download
+    return gd_ts > local_ts
+
+def update_database(songs):
     # Create database files
     clear_ouptput_folder()
     used_instruments = set()
@@ -407,32 +495,21 @@ def update_database(songs):
         part_song_ids[part] = 0
 
     for song in songs:
-        print("Gathering metadata for [green]" + song['title'])
-        for file in song['files']:
-            print('    Downloading file [green]' + file['name'])
-            metadata = get_file_metadata(file['id'])
-            if metadata['mimeType'] != 'application/pdf':
-                continue
-            file['filesize'] = int(metadata['size'])
-            file['filehash'] = java_string_hashcode(file['name'])
-            # if file['name'] == 'Wipe_Eauxt_1_2 - Tenor Sax.pdf':
-            #     print("    [red]Subbing hash code")
-            #     file['filehash'] = 142563180
-            file['filesize'] = int(file.get("filesize", 0))
-            dt = parser.isoparse(metadata['modifiedTime'])
-            file['lastmodified'] = int(dt.timestamp() * 1000)
-            dt = parser.isoparse(metadata['createdTime'])
-            file['creationdate'] = int(dt.timestamp() * 1000)
-
-            # Download the file
-            request = drive.files().get_media(fileId=file['id'])
-            fh = io.FileIO('intermediate/temp_file.pdf', 'wb')
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while not done:
-                status, done = downloader.next_chunk()
-            file['pagecount'] = get_page_count('intermediate/temp_file.pdf')
-            file['pageorder'] = '1-' + str(file['pagecount'])
+        print("Downloading files (to count pages) for [green]" + song['name'])
+        os.makedirs("cache", exist_ok=True)
+        os.makedirs("cache/pdf", exist_ok=True)
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futures = []
+            for file in song['files']:
+                file_name_sanitized = file['name'].replace(' ', '_').replace('\\', '_').replace('/','_')
+                file_cache_path = "cache/pdf/" + file_name_sanitized
+                if needs_download("cache/pdf", file_name_sanitized, file["modifiedTime"]):
+                    print('    Downloading PDF for [green]' + file['name'])
+                    download_pdf_for_pagecount(file, "cache/pdf/" + file_name_sanitized) # TODO - don't download if we have a copy
+                else:
+                    print('    Using cached PDF for [green]' + file_name_sanitized)                
+                file['pagecount'] = get_page_count(file_cache_path)
+                file['pageorder'] = '1-' + str(file['pagecount'])
 
         for part in song['parts']:
             db_path = 'output/' + part.replace(' ','_').lower() + '.db'
@@ -442,17 +519,17 @@ def update_database(songs):
             for file in song['parts'][part]:
                 part_song_ids[part] += 1
                 song_id = part_song_ids[part]
-                print("Inserting Song [green]" + file['name'])
+                print("    Inserting Song [green]" + file['name'])
                 
                 cur.execute("""
                 INSERT INTO Songs (Title, Difficulty, LastPage, OrientationLock, Duration, Stars, VerticalZoom, Sharpen, SharpenLevel, CreationDate, LastModified, Keywords, AutoStartAudio, SongId)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (file['name'][:-4], 0, 0, 0, 0, 0, 1.0, 0, 7, file['creationdate'], file['lastmodified'], "", 0, part_song_ids[part]))
+                (file['name'][:-4], 0, 0, 0, 0, 0, 1.0, 0, 7, file['createdTime'], file['modifiedTime'], "", 0, part_song_ids[part]))
 
                 cur.execute("""
                 INSERT INTO Files (SongId, Path, PageOrder, FileSize, LastModified, Source, Type, SourceFilePageCount, FileHash, Width, Height)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (song_id, part_folder_ids[part] + '/' + file['name'], file['pageorder'], file['filesize'], file['lastmodified'], 1, 1, file['pagecount'], file['filehash'], -1, -1))
+                (song_id, part_folder_ids[part] + '/' + file['name'], file['pageorder'], file['size'], file['modifiedTime'], 1, 1, file['pagecount'], file['filehash'], -1, -1))
 
                 cur.execute("""
                 INSERT INTO AutoScroll (SongId, Behavior, PauseDuration, Speed, FixedDuration, ScrollPercent, ScrollOnLoad, TimeBeforeScroll)
@@ -491,8 +568,8 @@ def update_database(songs):
                 with open('output/'+part.replace(' ','_').lower() + '_hashcodes.txt', "a", encoding="utf-8") as f_out:
                     f_out.write(f"{part_folder_ids[part]}/{file['name']}\n")
                     f_out.write(f"{file['filehash']}\n")
-                    f_out.write(f"{file['lastmodified']}\n")
-                    f_out.write(f"{file['filesize']}\n")
+                    f_out.write(f"{file['modifiedTime']}\n")
+                    f_out.write(f"{file['size']}\n")
 
             conn.commit()
             conn.close()
@@ -509,12 +586,55 @@ def update_database(songs):
 # exit()
 
 # Assemble song list
-songs = scrape_folder_of_songs([SRC_MUSIC_FOLDER, SEASONAL_SONGS])
+
+songs = {}
+cache = load_dict('cache/cache.json')
+if args.cached and cache:
+    print('[cyan]Loading songs from cached file!')
+    songs = cache
+else:
+    print("[cyan]Querying LTBB Drive...")
+    songs = query_tree([SRC_MUSIC_FOLDER, SEASONAL_SONGS])
+    print(songs[0])
+    print("[cyan]Done querying!")
+    print()
+    save_dict('cache/cache.json', songs)
+    time.sleep(1)
+
+print("[cyan]Assembling part information...")
+for song in songs:
+    print("    Assembling part information for [green]" + song['name'])
+    # Get part information:
+    assemble_song_parts(song)
+print("[cyan]Part information assembled!")
+if len(no_instrument_files) > 0:
+    print('[yellow] Some files had no instruments:')
+    for file in no_instrument_files:
+        print(    '[yellow]' + file)
+
+print("[cyan]See part information at [green]cache/songs_with_parts.json")
+save_dict('cache/songs_with_parts.json', songs)
+time.sleep(1)
+
+if not args.nocopy:
+    print()
+    print('[cyan]Copying songs into Google Drive folders...')
+    copy_songlist_into_drive(songs)
+    print('[cyan]Songs copied into Drive!')
+    time.sleep(1)
+else:
+    # Populate folder IDs
+    print()
+    print("[cyan]Getting part folder IDs...")
+    for part in instruments:
+        print("    Finding [magenta]" + part)
+        get_or_create_folder(part, DEST_MUSIC_FOLDER)
+
 print()
-print("Songs:")
-pprint(songs)
-copy_songlist_into_drive(songs)
+print("[cyan]Updating databases...")
 update_database(songs)
+print("[cyan]Database updated!")
+time.sleep(1)
 
 
 # drive = build("drive", "v3", credentials=creds)

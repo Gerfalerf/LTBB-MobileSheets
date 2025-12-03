@@ -3,4 +3,5 @@ token.json
 *.db
 downloads/
 intermediate/
+cache/
 output/
