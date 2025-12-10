@@ -70,7 +70,7 @@ SEASONAL_SONGS = "1M7sLr9wwvHJIfKGijRTSjC5ae1CODzbY"
 # TODO
 # - if no instruments:
 #   - Horn means F Horn
-#   - take Bb Eb F when no instruments available
+#   - take any Bb/Eb/F/etc when no instruments available
 
 # Instrument list
 instruments = {
@@ -587,7 +587,6 @@ def update_database(songs, setlists):
                             break
                         for setlist_file in setlist_song['files']:
                             if setlist_file['name'] == file['name']:
-                                print("Found match for " + setlist_file['name'] + ' and ' + file['name'])
                                 cur.execute("""
                                 INSERT INTO SetlistSong (SetlistId, SongId)
                                 VALUES (?, ?)""",
@@ -630,7 +629,6 @@ if args.cached and cache:
 else:
     print("[cyan]Querying LTBB Drive...")
     songs = query_tree([SRC_MUSIC_FOLDER, SEASONAL_SONGS])
-    print(songs[0])
     print("[cyan]Done querying!")
     print()
     time.sleep(1)
@@ -654,9 +652,6 @@ for setlist_name in setlist_docs:
     setlist['name'] = setlist_name
     setlist['songs'] = setlist_songs
     setlists.append(setlist)
-
-print(setlists)
-input("Press Enter")
 
 # Save before adding parts, we'll let that happen every time in case we want to change the schema
 save_dict('cache/cache.json', songs)
