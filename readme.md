@@ -21,7 +21,9 @@ _The first time you run the script, it will take longer. This is because we have
 ## Syncing with MobileSheets
 1. Make sure the [LTBB MobileSheets](https://drive.google.com/drive/u/0/folders/1rGkyWusZDKKIk9gQAOMNpind1Oh95Zjb) folder is added to your Google Drive
 2. Use a separate Library! MobileSheets lets you create multiple libraries under Menu -> Switch Libraries. This will keep any other music you have in MobileSheets from being clobbered by this tool.
-3. In MobileSheets, go to Menu -> Sync Library and select the folder containing your instrument. The first time you sync it will take a long time, but subsequent syncs will be fast!
+3. In MobileSheets, go to Menu -> Sync Library and select the folder containing your instrument. 
+    1.The first time you sync it will take a long time, but subsequent syncs will be fast!
+    2. If you are unwilling to give MobileSheets R/W access to your Drive, you can create a dummy Google Drive account and add the [LTBB MobileSheets](https://drive.google.com/drive/u/0/folders/1rGkyWusZDKKIk9gQAOMNpind1Oh95Zjb) to its Drive.
 4. Sync once a week to get the new Rehearsal Setlist and any updated songs!
 
 ## TODO
