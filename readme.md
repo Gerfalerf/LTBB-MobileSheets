@@ -34,3 +34,4 @@ _The first time you run the script, it will take longer. This is because we have
 - On auth failure, delete token.json and re-run
 - Since we are doing all this anyways, it would not be hard to just add all the rehearsal PDFs to a Google Drive subfolder, since not everyone uses MobileSheets 
 - Add some kind of lock file maybe, in case two people run the script at the same time
+- Sometimes the Score PDF is just listed with no instrument, but should still go into the Score folder

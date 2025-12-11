@@ -375,7 +375,8 @@ def copy_songlist_into_drive(songs):
         if song is None:
             print('[red]ERROR - no song!')
 
-        print("Copying files for [green]" + song['name'])
+        if args.verbose:
+            print("Copying files for [green]" + song['name'])
         for part_key in song['parts']:
             files = song['parts'][part_key]
             # Some parts have more than one chart (trumpet 1/2)
@@ -416,7 +417,15 @@ def upload_to_drive(local_path, dest_name, parent_folder_id):
     for f in results.get("files", []):
         if args.verbose:
             print(f"    Deleting old {f['name']} ({f['id']})")
-        drive.files().delete(fileId=f["id"], supportsAllDrives=True).execute()
+        # The delete call permanently deletes, which requires Drive membership
+        # I am but a lowly Content Manager, so I will move to trash, which is also much safer
+        # and I didn't know existed until Google Drive prevented me from doing it via API
+        # drive.files().delete(fileId=f["id"], supportsAllDrives=True).execute()
+        drive.files().update(
+            fileId=f["id"],
+            body={"trashed": True},
+            supportsAllDrives=True
+        ).execute()
 
     # Upload the new file
     file_metadata = {
@@ -437,7 +446,7 @@ def upload_to_drive(local_path, dest_name, parent_folder_id):
         print(f"    Uploaded {uploaded['name']} ({uploaded['id']})")
     return uploaded["id"]
 
-def clear_ouptput_folder():
+def clear_output_folder():
     folder = 'output'
     for name in os.listdir(folder):
         path = os.path.join(folder, name)
@@ -497,7 +506,7 @@ def needs_download(local_dir, filename, gd_modified_ms):
 
 def update_database(songs, setlists):
     # Create database files
-    clear_ouptput_folder()
+    clear_output_folder()
     used_instruments = set()
     for song in songs:
         for part in song['parts']:
@@ -538,10 +547,11 @@ def update_database(songs, setlists):
                 file_name_sanitized = file['name'].replace(' ', '_').replace('\\', '_').replace('/','_')
                 file_cache_path = "cache/pdf/" + file_name_sanitized
                 if needs_download("cache/pdf", file_name_sanitized, file["modifiedTime"]):
-                    # print('    Downloading PDF for [green]' + file['name'])
+                    print('    Downloading and caching PDF for [green]' + file['name'] + '. The local file is used to count pages, and also to speed up queries in subsequent script runs.')
                     download_pdf_for_pagecount(file, "cache/pdf/" + file_name_sanitized) # TODO - don't download if we have a copy
-                # else:
-                    # print('    Using cached PDF for [green]' + file_name_sanitized)                
+                else:
+                    if args.verbose:
+                        print('    Using cached PDF for [green]' + file_name_sanitized)                
                 file['pagecount'] = get_page_count(file_cache_path)
                 file['pageorder'] = '1-' + str(file['pagecount'])
 
