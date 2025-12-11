@@ -11,9 +11,9 @@ This is a project for preparing a MobileSheets database for LTBB.
 - Follow the [Google Workspace API](https://developers.google.com/workspace/drive/api/quickstart/python) quickstart instructions up to the step of downloading a credentials.json file into your working folder
 
 ## Running the Script
-_The first time you run the script, it will take longer. This is because we have to download the PDFs in order to count the pages, which the MobileSheets database requires. Subsequent runs will be faster, as it will use this cache not only to skip both downloads and Google Drive copy operations for files that have not changed in the Drive!_
+_The first time you run the script, it will take longer. This is because we have to download the PDFs in order to count the pages, which the MobileSheets database requires. Subsequent runs will be faster, as it will use this cache to skip both downloads and some Google Drive query operations for files that have not since changed in the Drive!_
 
-1. Make sure [Geoffrey's LTBB MobileSheets](https://drive.google.com/drive/u/0/folders/1rGkyWusZDKKIk9gQAOMNpind1Oh95Zjb) folder is added to your Google Drive. (Right now you'll need edit access from Geoffrey, but we should give LTBB owner/edit access so it can dole out permissions)
+1. Make sure [Geoffrey's LTBB MobileSheets](https://drive.google.com/drive/u/0/folders/1rGkyWusZDKKIk9gQAOMNpind1Oh95Zjb) folder is added to your Google Drive. (Right now you'll need edit access from Geoffrey, but we should give LTBB owner/edit access so it can dole out the permissions instead of me)
 2. `python main.py`
     1. The first time you run the script, it will prompt you for permission and generate a token.json.
     2. If you haven't run the script in a while, you may need to delete token.json and regenerate it.
