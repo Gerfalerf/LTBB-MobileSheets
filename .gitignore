@@ -1,5 +1,7 @@
 credentials.json
 token.json
+# Just in case anyone tries to commit any credentials, no JSONs allowed.
+*.json
 *.db
 downloads/
 intermediate/
