@@ -19,10 +19,10 @@ _The first time you run the script, it will take longer. This is because we have
     2. If you haven't run the script in a while, you may need to delete token.json and regenerate it.
 
 ## Syncing with MobileSheets
-1. Make sure the [LTBB MobileSheets](https://drive.google.com/drive/u/0/folders/1rGkyWusZDKKIk9gQAOMNpind1Oh95Zjb) folder is added to your Google Drive
+1. Make sure a shortcut the LTBB [Mobile Sheets](https://drive.google.com/drive/u/0/folders/1h-T2mnFrr0VpafBDJ3nv3vvO_xLGir9t) folder is added to your Google Drive. You won't be able to sync if you don't do this!
 2. Use a separate Library! MobileSheets lets you create multiple libraries under Menu -> Switch Libraries. This will keep any other music you have in MobileSheets from being clobbered by this tool.
 3. In MobileSheets, go to Menu -> Sync Library and select the folder containing your instrument. 
-    1.The first time you sync it will take a long time, but subsequent syncs will be fast!
+    1. The first time you sync it will take a long time, but subsequent syncs will be fast!
     2. If you are unwilling to give MobileSheets R/W access to your Drive, you can create a dummy Google Drive account and add the [LTBB MobileSheets](https://drive.google.com/drive/u/0/folders/1rGkyWusZDKKIk9gQAOMNpind1Oh95Zjb) to its Drive.
 4. Sync once a week to get the new Rehearsal Setlist and any updated songs!
 
@@ -30,8 +30,8 @@ _The first time you run the script, it will take longer. This is because we have
 - Maybe transfer ownership of my (Geoffrey's) Google Drive folder to an LTBB account
 - Some instruments should receive other instruments' parts if they don't have one. (e.g. Bass Sax should get the Tuba part). Need to speak to humans to figure this out.
   - Also, e.g. Saints has instrumentation like "Bb instruments"/"Eb instruments" which the script currently doesn't handle, but could be made to.
+  - Sometimes the Score PDF is just listed with no instrument, but should still go into the Score folder
 - Change song names automatically, so that songs of the form "Tenor Sax - Blah" are renamed to "Blah - Tenor Sax" so they are alphabetical by title.
 - On auth failure, delete token.json and re-run
 - Since we are doing all this anyways, it would not be hard to just add all the rehearsal PDFs to a Google Drive subfolder, since not everyone uses MobileSheets 
 - Add some kind of lock file maybe, in case two people run the script at the same time
-- Sometimes the Score PDF is just listed with no instrument, but should still go into the Score folder
