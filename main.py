@@ -33,6 +33,7 @@ MEMORIZATION_LIST_ID = "1lYz54_jarIxfqZu0vVebfcRIBykGsikdSs3QNhlecU0" # TODO - t
 DEST_MUSIC_FOLDER = "1h-T2mnFrr0VpafBDJ3nv3vvO_xLGir9t" # The folder where the MobileSheets database and PDFs will end up
 SRC_MUSIC_FOLDER = "12y2cjGE7GE3MTJ8QtNs3_Z5L30o5Ql6D" # The LTBB folder containing all the sheet music. Currently organized in folders like 'A-C', 'D-F', etc
 SEASONAL_SONGS = "1M7sLr9wwvHJIfKGijRTSjC5ae1CODzbY" # Some subfolders that contain additional songs not in the alphabetic folders
+DRIVE_ID = "0AIscw8ywGnshUk9PVA" # Quirk of using a Shared Drive, we sometimes need this
 
 # Warning - if the 5. Resources folder name ever changes, we are at risk of some terrible infinite recursion because this script uploads files there
 IGNORE_FOLDERS = ['1. Member Drafts', '2. Seasonal Songs', '3. Warm-ups', '4. 3rd Rail Drumline', '5. Resources', '6. Recordings']
@@ -47,6 +48,7 @@ arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument('--clean', action="store_true", help="Force a clean redownload of songs, clear local cache. This does NOT clean the Google Drive folder, do that manually if needed (it shouldn't be needed).") 
 arg_parser.add_argument('--skipquery', action="store_true", help="Used for inner dev loop. Stores the file metadata of the drive so we don't have to requery each song. But usually you want to requery.")
 arg_parser.add_argument('--verbose', action="store_true", help="Spit out extra info") 
+arg_parser.add_argument('--dedupe', action="store_true", help="For use when a part folder accidentally ends up with multiple copies of the same file. Shouldn't happen.") 
 args = arg_parser.parse_args()
 
 drive_lock = Lock()
@@ -92,7 +94,7 @@ instruments = {
     'Eb Horn' : ['Eb Horn', 'Horn in Eb'],
     'Flute' : ['Flute', 'C Woodwind']
 }
-part_folder_ids = {}
+part_folders = {}
 flat_instrument_list = [sub for main in instruments for sub in instruments[main]]
 instrument_lookup = {}
 for main in instruments:
@@ -109,30 +111,51 @@ def load_dict(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
+def query_drive_files(query, fields):
+    page_token = None
+    files = []
+
+    # Need to include nextPageToken because sometimes there are more than 100 files.
+    fields = f"nextPageToken, {fields}"
+
+    while True:
+        response = drive.files().list(
+            q=query,
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            pageSize=100,
+            pageToken=page_token,
+            fields=fields
+        ).execute()
+
+        # Get the next page of files
+        files.extend(response['files'])
+        page_token = response.get('nextPageToken')
+
+        if not page_token:
+            break
+    return files
+
 def list_folders_in_folder(folder_id):
-    folder_results = drive.files().list(
-        q=f"'{folder_id}' in parents and mimeType = 'application/vnd.google-apps.folder'",
-        includeItemsFromAllDrives=True,
-        supportsAllDrives=True,
-        fields="files(id, name)"
-    ).execute()
-    return folder_results["files"]
+    return query_drive_files(
+        query=f"'{folder_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+        fields="files(id, name)",
+    )
 
 def list_pdfs_in_folder(folder_id):
-    results = drive.files().list(
-        q=f"'{folder_id}' in parents and mimeType = 'application/pdf'",
-        includeItemsFromAllDrives=True,
-        supportsAllDrives=True,
+    files = query_drive_files(
+        query=f"'{folder_id}' in parents and mimeType = 'application/pdf' and trashed = false",
         fields="files(id, name, size, createdTime, modifiedTime, parents)"
-    ).execute()
+    )
+
     # Populate extra metadata we will need
-    for file in results['files']:
+    for file in files:
         file['filehash'] = java_string_hashcode(file['name'])
         dt = parser.isoparse(file['modifiedTime'])
         file['modifiedTime'] = int(dt.timestamp() * 1000)
         dt = parser.isoparse(file['createdTime'])
         file['createdTime'] = int(dt.timestamp() * 1000)
-    return results["files"]
+    return files
 
 def query_tree(root_ids):
     # Get top level folders
@@ -156,7 +179,8 @@ def query_tree(root_ids):
     folders.sort(key=lambda folder: folder['name'])
     i = 0
     for folder in folders:
-        add_files_to_folder(folder)
+        print("    Assembling song [green]" + folder['name'])
+        folder['files'] = list_pdfs_in_folder(folder['id'])
         i += 1
         if i >= MAX_SONGS:
             break
@@ -164,11 +188,6 @@ def query_tree(root_ids):
     folders = [folder for folder in folders if 'files' in folder and len(folder['files']) > 0]
 
     return folders
-
-def list_files(folder_id):
-    query = f"'{folder_id}' in parents"
-    result = drive.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
-    return result.get("files", [])
 
 def folder_contains_pdfs(folder_id):
     query = f"'{folder_id}' in parents and mimeType = 'application/pdf' and trashed = false"
@@ -218,15 +237,8 @@ def get_folder_name(folder_id):
     return drive.files().get(
         fileId=folder_id,
         fields="id, name",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True
+        supportsAllDrives=True
     ).execute()['name']
-
-# Fetches the PDF file IDs and splits them into parts
-def add_files_to_folder(folder):
-    print("    Assembling song [green]" + folder['name'])
-    folder['files'] = list_pdfs_in_folder(folder['id'])
-    return folder
 
 def extract_folder_id(url):
     match = re.search(r"/folders/([a-zA-Z0-9_-]+)", url)
@@ -258,28 +270,18 @@ def scrape_song_list(doc_id):
             continue
         folder_name = get_folder_name(folder_id)
         print('    Found folder in doc: [green]' + folder_name)
-        folder = {'id': folder_id, 'name': folder_name}
-        add_files_to_folder(folder)
+        folder = {'id': folder_id, 'name': folder_name, 'files': list_pdfs_in_folder(folder_id)}
         
         if 'files' in folder and len(folder['files']) > 0:
             songs.append(folder)
     
-    songs.sort(key=lambda folder: folder['name'])
     return songs
 
 def list_subfolders(parent_folder_id):
-    query = (
-        f"'{parent_folder_id}' in parents "
-        "and mimeType = 'application/vnd.google-apps.folder' "
-        "and trashed = false"
+    return query_drive_files(
+        query =  f"'{parent_folder_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+        fields="files(id, name)"
     )
-    results = drive.files().list(
-        q=query,
-        fields="files(id, name)",
-        pageSize=1000  # adjust if needed
-    ).execute()
-    
-    return results.get("files", [])
 
 # Drive Create folder
 def create_folder(name, parent_id=None):
@@ -306,21 +308,18 @@ def get_or_create_folder(name, parent_id=None):
     if parent_id:
         query += f" and '{parent_id}' in parents and trashed = false"
 
-    results = drive.files().list(
-        q=query,
+    files = query_drive_files(
+        query = query,
         fields="files(id, name)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True
-    ).execute()
+    )
 
-    files = results.get("files", [])
     if files:
-        part_folder_ids[name] = files[0]['id']
+        part_folders[name] = files[0]
         return files[0]   # already exists
 
     # otherwise create it
     file = create_folder(name=name, parent_id=parent_id)
-    part_folder_ids[name] = file['id']
+    part_folders[name] = file
     return file
 
 
@@ -329,37 +328,34 @@ def escape_drive_query(name):
     return name.replace("'", "\\'")
 
 # Drive copy file if newer
-def sync_file(source_file_id, dest_folder_id, new_name=None):
+def sync_file(source_file, dest_folder, existing_file=None, new_name=None):
     # Get source file metadata
-    source = drive.files().get(
-        fileId=source_file_id,
-        fields="id, name, modifiedTime"
-    ).execute()
-    source_name = new_name or source["name"]
-    source_modified = source["modifiedTime"]
+    source_name = new_name or source_file["name"]
+    source_modified = source_file["modifiedTime"]
 
-    # Check if a file with the same name exists in destination
-    query = f"name contains '{escape_drive_query(source_name)}' and '{dest_folder_id}' in parents and trashed = false"
-    results = drive.files().list(q=query, fields="files(id, name, modifiedTime)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
-    existing_files = results.get("files", [])
-
-    if existing_files:
-        existing = existing_files[0]
-        existing_modified = existing["modifiedTime"]
+    if existing_file:
+        existing_modified = existing_file["modifiedTime"]
 
         # Compare modified timestamps
         if source_modified > existing_modified:
             print(f"    Source file is newer. Replacing '{source_name}'")
             # Delete the old copy
-            drive.files().delete(fileId=existing["id"], supportsAllDrives=True).execute()
+            # Don't use delete() anymore since that is a permanent operation and requires Drive membership
+            # drive.files().delete(fileId=existing["id"], supportsAllDrives=True).execute()
+            drive.files().update(
+                fileId=existing_file["id"],
+                body={"trashed": True},
+                supportsAllDrives=True
+            ).execute()
         else:
-            print(f"    Existing file '{source_name}' is up-to-date. Skipping copy.")
-            return existing["id"]  # nothing to do
+            if args.verbose:
+                print(f"    Existing file '{source_name}' is up-to-date. Skipping copy.")
+            return existing_file["id"]  # nothing to do
 
     # Copy the source file into the folder
-    new_file_metadata = {"parents": [dest_folder_id], "name": source_name}
-    copied_file = drive.files().copy(fileId=source_file_id, body=new_file_metadata, fields="id, name", supportsAllDrives=True).execute()
-    print(f"    Copied [green]'{source_name}'[/green] to folder")
+    new_file_metadata = {"parents": [dest_folder['id']], "name": source_name}
+    copied_file = drive.files().copy(fileId=source_file['id'], body=new_file_metadata, fields="id, name", supportsAllDrives=True).execute()
+    print(f"    Copied '[green]{source_name}[/green]' to folder '[magenta]{dest_folder['name']}[/magenta]'")
     return copied_file["id"]
 
 def get_file_metadata(file_id):
@@ -368,6 +364,20 @@ def get_file_metadata(file_id):
         fields="id, name, mimeType, size, createdTime, modifiedTime, md5Checksum, parents",
         supportsAllDrives=True
     ).execute()
+
+# De-dupe files... for debugging when things get messed up
+def dedupe_files(folder):
+    seen = set()
+    for file in folder['files']:
+        if file['name'] not in seen:
+            seen.add(file['name'])
+        else:
+            print(f"De-duping '[green]{file['name']}[/green]' with ID {file['id']} in folder '[magenta]{folder['name']}'[/magenta]")
+            drive.files().update(
+                fileId=file["id"],
+                body={"trashed": True},
+                supportsAllDrives=True
+            ).execute()
 
 # Make copies of files to my Drive
 def copy_songlist_into_drive(songs):
@@ -379,24 +389,25 @@ def copy_songlist_into_drive(songs):
             print("Copying files for [green]" + song['name'])
         for part_key in song['parts']:
             files = song['parts'][part_key]
-            # Some parts have more than one chart (trumpet 1/2)
-            for file in files:        
-                # If my cached copy locally is newer than the version in the LTBB drive, skip.
-                file_name_sanitized = file['name'].replace(' ', '_').replace('\\', '_').replace('/','_')
-                file_cache_path = "cache/pdf/" + file_name_sanitized
-                if needs_download("cache/pdf", file_name_sanitized, file["modifiedTime"]):
-                    part_folder = get_or_create_folder(part_key, DEST_MUSIC_FOLDER)
-                    copied = sync_file(
-                        source_file_id=file['id'],
-                        dest_folder_id=part_folder['id'],
-                        new_name=file['name']
-                    )
-                    print(f"    Caching [green]'{file['name']}'[/green] locally, this will be faster next time.")
-                else:
+            # Some parts have more than one chart (trumpet 1/2), so copy all files
+            for file in files:
+                needs_copy = True
+                existing_dest_file = None
+                for dest_file in part_folders[part_key]['files']:
+                    if dest_file['name'] == file['name']:
+                        if args.verbose:
+                            print("    Found an existing file for [green]" + file['name'])
+                        existing_dest_file = dest_file
+                if not existing_dest_file:
                     if args.verbose:
-                        print(f"    Skipped [green]'{file['name']}'[/green] because the cached copy is newer.")
+                        print("     No existing Drive file found in destination folder for [green]" + file['name'])    
 
-            # print("New file ID:", copied)
+                copied = sync_file(
+                    source_file=file,
+                    dest_folder=part_folders[part_key],
+                    existing_file=existing_dest_file,
+                    new_name=file['name']
+                )
 
 def upload_to_drive(local_path, dest_name, parent_folder_id):
     # Look for existing file with this exact name in this exact folder
@@ -406,15 +417,13 @@ def upload_to_drive(local_path, dest_name, parent_folder_id):
         "and trashed = false"
     )
 
-    results = drive.files().list(
-        q=query,
-        fields="files(id, name)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True
-    ).execute()
+    files = query_drive_files(
+        query = query,
+        fields = "files(id, name)",
+    )
 
     # Delete existing file(s) with that name
-    for f in results.get("files", []):
+    for f in files:
         if args.verbose:
             print(f"    Deleting old {f['name']} ({f['id']})")
         # The delete call permanently deletes, which requires Drive membership
@@ -487,6 +496,18 @@ def download_pdf_for_pagecount(file, dest_path):
         while not done:
             status, done = downloader.next_chunk()
 
+# Keeps the first, removes those at the end
+def remove_duplicate_dicts(data):
+    seen = set()
+    to_remove = []
+    for i in range(len(data)):
+        if data[i]["name"] in seen:
+            to_remove.append(i)
+        else:
+            seen.add(data[i]["name"])
+    for i in reversed(to_remove):
+        del data[i]
+
 def needs_download(local_dir, filename, gd_modified_ms):
     local_dir = pathlib.Path(local_dir)
     local_path = local_dir / f"{filename}"
@@ -546,8 +567,9 @@ def update_database(songs, setlists):
             for file in song['files']:
                 file_name_sanitized = file['name'].replace(' ', '_').replace('\\', '_').replace('/','_')
                 file_cache_path = "cache/pdf/" + file_name_sanitized
+
                 if needs_download("cache/pdf", file_name_sanitized, file["modifiedTime"]):
-                    print('    Downloading and caching PDF for [green]' + file['name'] + '. The local file is used to count pages, and also to speed up queries in subsequent script runs.')
+                    print('    Downloading and caching PDF for [green]' + file['name'])
                     download_pdf_for_pagecount(file, "cache/pdf/" + file_name_sanitized) # TODO - don't download if we have a copy
                 else:
                     if args.verbose:
@@ -570,12 +592,10 @@ def update_database(songs, setlists):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (file['name'][:-4], 0, 0, 0, 0, 0, 1.0, 0, 7, file['createdTime'], file['modifiedTime'], "", 0, 0))
 
-                # print(part_folder_ids)
-
                 cur.execute("""
                 INSERT INTO Files (SongId, Path, PageOrder, FileSize, LastModified, Source, Type, SourceFilePageCount, FileHash, Width, Height)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (song_id, part_folder_ids[part] + '/' + file['name'], file['pageorder'], file['size'], file['modifiedTime'], 1, 1, file['pagecount'], file['filehash'], -1, -1))
+                (song_id, part_folders[part]['id'] + '/' + file['name'], file['pageorder'], file['size'], file['modifiedTime'], 1, 1, file['pagecount'], file['filehash'], -1, -1))
 
                 cur.execute("""
                 INSERT INTO AutoScroll (SongId, Behavior, PauseDuration, Speed, FixedDuration, ScrollPercent, ScrollOnLoad, TimeBeforeScroll)
@@ -629,7 +649,7 @@ def update_database(songs, setlists):
 
                 # Add line to hashcodes
                 with open('output/'+part.replace(' ','_').lower() + '_hashcodes.txt', "a", encoding="utf-8") as f_out:
-                    f_out.write(f"{part_folder_ids[part]}/{file['name']}\n")
+                    f_out.write(f"{part_folders[part]['id']}/{file['name']}\n")
                     f_out.write(f"{file['filehash']}\n")
                     f_out.write(f"{file['modifiedTime']}\n")
                     f_out.write(f"{file['size']}\n")
@@ -642,9 +662,9 @@ def update_database(songs, setlists):
         db_name = instrument.replace(' ','_').lower() + '.db'
         hashcodes_name = instrument.replace(' ','_').lower() + '_hashcodes.txt'
         print('Uploading [cyan]output/' + db_name + '[/cyan] and [cyan]' + hashcodes_name + '[/cyan] to [green]' + instrument)
-        part_folder = part_folder_ids[instrument]
-        upload_to_drive(local_path='output/'+db_name, dest_name='mobilesheets.db', parent_folder_id = part_folder)
-        upload_to_drive(local_path='output/'+hashcodes_name, dest_name='mobilesheets_hashcodes.txt', parent_folder_id = part_folder)
+        part_folder_id = part_folders[instrument]['id']
+        upload_to_drive(local_path='output/'+db_name, dest_name='mobilesheets.db', parent_folder_id = part_folder_id)
+        upload_to_drive(local_path='output/'+hashcodes_name, dest_name='mobilesheets_hashcodes.txt', parent_folder_id = part_folder_id)
 
 
 ### Main script execution starts here ###
@@ -671,23 +691,33 @@ else:
     # Read the rehearsal schedule
     # TODO - memorization list actually does not link to any sheet music
     setlists = []
-    setlist_docs = {"Memorization List": MEMORIZATION_LIST_ID, "Rehearsal": WEEKLY_AGENDA_ID}
+    # setlist_docs = {"Memorization List": MEMORIZATION_LIST_ID, "Rehearsal": WEEKLY_AGENDA_ID}
+    setlist_docs = {"Rehearsal": WEEKLY_AGENDA_ID}
 
     for setlist_name in setlist_docs:
         print()
         print('[cyan]Assembling song metadata from Doc ' + setlist_name)
         setlist_doc_id = setlist_docs[setlist_name]
         setlist_songs = scrape_song_list(setlist_doc_id)
-        setlist_song_titles = [song['name'] for song in setlist_songs]
-        # Update songs. If there are conflicts, use the one in the doc - TODO this is not good enough, sometimes the same song appears twice in one doc
-        songs = [song for song in songs if song['name'] not in setlist_song_titles]
+        remove_duplicate_dicts(setlist_songs)
+        # Update songs. If there are conflicts, use the one in the doc
         songs = setlist_songs + songs
+        seen = set()
+        unique_songs = []
+        for song in songs:
+            if song["name"] not in seen:
+                unique_songs.append(song)
+                seen.add(song["name"])
+        songs = unique_songs
 
         # Assemble setlist by name
         setlist = {}
         setlist['name'] = setlist_name
         setlist['songs'] = setlist_songs
         setlists.append(setlist)
+    remove_duplicate_dicts(songs)
+
+time.sleep(1)
 
 # Save before adding parts, we'll let that happen every time in case we want to change the schema
 os.makedirs('cache', exist_ok=True)
@@ -713,10 +743,18 @@ time.sleep(1)
 
 # Populate folder IDs
 print()
-print("[cyan]Getting part folder IDs...")
+print("[cyan]Getting destination part folder IDs...")
 for part in instruments:
-    print("    Finding [magenta]" + part)
-    get_or_create_folder(part, DEST_MUSIC_FOLDER)
+    print("    Finding part folder [magenta]" + part)
+    # Populates part_folders
+    folder = get_or_create_folder(part, DEST_MUSIC_FOLDER)
+    folder['files'] = list_pdfs_in_folder(folder['id'])
+    print("        Found " + str(len(folder['files'])) + " existing PDFs")
+
+if args.dedupe:
+    print("[cyan]Deduping files, because somehow Geoffrey ended up getting multiple copies of the same PDF into a part folder.")
+    for part in part_folders:
+        dedupe_files(part_folders[part])
 
 # Copy files from Src drive folder to Destination drive folder 
 # Skips if the Src song is not newer than the Dest song
