@@ -183,6 +183,9 @@ def main():
     save_dict('cache/songs_with_parts.json', songs)
     time.sleep(1)
 
+    # Rename all files of the form 'Instrument - SongTitle.pdf" into "SongTitle - Instrument.pdf" because then they'll be alphabetical
+    get_song_preferred_names(songs)
+
     # Find destination part Drive folder IDs and existing files
     print()
     push_log_section("[cyan]Querying destination part folders...")
@@ -245,6 +248,25 @@ def main():
         for error in error_log:
             print(error)
 
+def get_song_preferred_names(songs):
+    possible_instruments = [key.lower().replace(' ', '_') for key in INSTRUMENT_LOOKUP]
+    for key in BACKUP_INSTRUMENTS:
+        possible_instruments.extend([word.lower().replace(' ', '_') for word in BACKUP_INSTRUMENTS[key]])
+    for song in songs:
+        for file in song['files']:
+            # Figure out if the file name starts with an instrument
+            file_name_split_sanitized = file['name'][:-4].lower().replace(' ', '_').replace('.','').split('-')
+            if len(file_name_split_sanitized) > 1:
+                for possible_key in possible_instruments:
+                    if possible_key in file_name_split_sanitized[0]:
+                        file_name_split = file['name'][:-4].split('-')
+                        file['preferred_name'] = "".join(file_name_split[1:]).strip() + ' - ' + file_name_split[0].strip()
+                        if args.verbose:
+                            print("    Turned [green]" + file['name'][:-4] + "[/green] into [green]" + file['preferred_name'] + "[/green] for alphabet reasons", print_to_std_out=False)
+                        break
+            if 'preferred_name' not in file:
+                file['preferred_name'] = file['name'][:-4]
+
 def warn(message, silent=False):
     message = '[yellow]WARNING: [/yellow]' + message
     if not silent:
@@ -258,7 +280,6 @@ def error(message, silent=False, crash=False):
     error_log.append(message)
     if crash:
         print(5 / 0)
-        
 
 def push_log_section(section_name, live=None, save_to_file=True):
     print(section_name, live=live, save_to_file=save_to_file)
@@ -344,6 +365,8 @@ def list_pdfs_in_folder(folder_id):
         fields="files(id, name, size, createdTime, modifiedTime, parents)"
     )
 
+    files
+
     # Populate extra metadata we will need
     for file in files:
         file['filehash'] = java_string_hashcode(file['name'])
@@ -421,7 +444,6 @@ def query_setlist_docs(setlist_docs, songs):
         setlist['song_index'] = setlist_index
         setlists.append(setlist)
         pop_log_section()
-        print("Setlist index:" + str(setlist['song_index']))
     return setlists
 
 # Finds PDF files in a song that did not match any instrument
@@ -476,6 +498,8 @@ def assemble_song_parts(song):
                         break
             if part_key not in song['parts'] and part_key not in ['Flute', 'Percussion', 'Score']:
                 warn("No part file found for instrument [magenta]" + part_key + "[/magenta] for song [green]" + song['name'])
+
+
 
     for file in song['files']:
         found = False
@@ -854,15 +878,14 @@ def update_database(songs, setlists, part_folders):
             conn.close()
         print("Fresh databases created!", live=live)
 
-    part_song_ids = {}
-    for part in used_instruments:
-        part_song_ids[part] = 0
-
+    # Download files to count pages
     push_log_section("[cyan]Downloading songs to count pages and assembling MobileSheets database...")
     with Live(log_indent + "Downloading...", console=console, refresh_per_second=4) as live:
-        for song in songs:
+        for song_idx in range(len(songs)):
+            song = songs[song_idx]
             os.makedirs("cache", exist_ok=True)
             os.makedirs("cache/pdf", exist_ok=True)
+            
             for file in song['files']:
                 file_name_sanitized = file['name'].replace(' ', '_').replace('\\', '_').replace('/','_')
                 file_cache_path = "cache/pdf/" + file_name_sanitized
@@ -875,91 +898,108 @@ def update_database(songs, setlists, part_folders):
                         print('Using cached PDF for [green]' + file_name_sanitized, live=live)
                 file['pagecount'] = get_page_count(file_cache_path)
                 file['pageorder'] = '1-' + str(file['pagecount'])
+    pop_log_section()
 
-            for part in song['parts']:
-                db_path = 'output/' + part.replace(' ','_').lower() + '.db'
-                conn = sqlite3.connect(db_path)
-                cur = conn.cursor()
+    for part in used_instruments:
+        push_log_section(f"[cyan]Assembling database for [magenta]{part}")
+        with Live(log_indent + "Opening database...", console=console, refresh_per_second=4) as live:
+            # Open database
+            db_path = 'output/' + part.replace(' ','_').lower() + '.db'
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            # A dict of song_idx to a dict of filename to song ID
+            #   song_idx: the index of the song in our python song list
+            #   song_id: the SongId field in the MobileSheets sqlite3 database
+            song_id = 0
+            song_ids = {}
+            for song_idx in range(len(songs)):
+                song = songs[song_idx]
+                if part in song['parts']:
+                    song_ids[song_idx] = {}
+                    for file in song['parts'][part]:
+                        song_id += 1
+                        song_ids[song_idx][file['name']] = song_id
 
-                for file in song['parts'][part]:
-                    part_song_ids[part] += 1
-                    song_id = part_song_ids[part]
-                    if args.verbose:
-                        print("Inserting Song [green]" + file['name'] + '[/green] into database [cyan]' + db_path, live=live)
-                    
-                    cur.execute("""
-                    INSERT INTO Songs (Title, Difficulty, LastPage, OrientationLock, Duration, Stars, VerticalZoom, Sharpen, SharpenLevel, CreationDate, LastModified, Keywords, AutoStartAudio, SongId)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (file['name'][:-4], 0, 0, 0, 0, 0, 1.0, 0, 7, file['createdTime'], file['modifiedTime'], "", 0, 0))
+                        if args.verbose:
+                            print("Inserting Song [green]" + file['name'] + '[/green] into database [cyan]' + db_path, live=live)
+                        
+                        if 'preferred_name' not in file:
+                            print("File did not have preferred name:")
+                            print(file)
 
-                    cur.execute("""
-                    INSERT INTO Files (SongId, Path, PageOrder, FileSize, LastModified, Source, Type, SourceFilePageCount, FileHash, Width, Height)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (song_id, part_folders[part]['id'] + '/' + file['name'], file['pageorder'], file['size'], file['modifiedTime'], 1, 1, file['pagecount'], file['filehash'], -1, -1))
-
-                    cur.execute("""
-                    INSERT INTO AutoScroll (SongId, Behavior, PauseDuration, Speed, FixedDuration, ScrollPercent, ScrollOnLoad, TimeBeforeScroll)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (song_id, 0, 8000, 3, 1000, 20, 0, 2000))
-
-                    for i in range(file['pagecount']):
+                        # The file names are ugly. We can change the name in the MobileSheets database without changing the file name.
                         cur.execute("""
-                        INSERT INTO Crop (SongId, Page, Left, Top, Right, Bottom, Rotation)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (song_id, i, 0, 0, 0, 0, 0))
+                        INSERT INTO Songs (Title, Difficulty, LastPage, OrientationLock, Duration, Stars, VerticalZoom, Sharpen, SharpenLevel, CreationDate, LastModified, Keywords, AutoStartAudio, SongId)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (file['preferred_name'], 0, 0, 0, 0, 0, 1.0, 0, 7, file['createdTime'], file['modifiedTime'], "", 0, 0))
 
-                    for i in range(file['pagecount']):
                         cur.execute("""
-                        INSERT INTO ZoomPerPage (SongId, Page, Zoom, PortPanX, PortPanY, LandZoom, LandPanX, LandPanY, FirstHalfY, SecondHalfY)
+                        INSERT INTO Files (SongId, Path, PageOrder, FileSize, LastModified, Source, Type, SourceFilePageCount, FileHash, Width, Height)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (song_id, part_folders[part]['id'] + '/' + file['name'], file['pageorder'], file['size'], file['modifiedTime'], 1, 1, file['pagecount'], file['filehash'], -1, -1))
+
+                        cur.execute("""
+                        INSERT INTO AutoScroll (SongId, Behavior, PauseDuration, Speed, FixedDuration, ScrollPercent, ScrollOnLoad, TimeBeforeScroll)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (song_id, 0, 8000, 3, 1000, 20, 0, 2000))
+
+                        for i in range(file['pagecount']):
+                            cur.execute("""
+                            INSERT INTO Crop (SongId, Page, Left, Top, Right, Bottom, Rotation)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (song_id, i, 0, 0, 0, 0, 0))
+
+                        for i in range(file['pagecount']):
+                            cur.execute("""
+                            INSERT INTO ZoomPerPage (SongId, Page, Zoom, PortPanX, PortPanY, LandZoom, LandPanX, LandPanY, FirstHalfY, SecondHalfY)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (song_id, i, 100.0, 0, 0, 100.0, 0, 0, 0, 0))
+
+                        cur.execute("""
+                        INSERT INTO MetronomeSettings (SongId, Sig1, Sig2, Subdivision, SoundFX, AccentFirst, AutoStart, CountIn, NumberCount, AutoTurn)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (song_id, i, 100.0, 0, 0, 100.0, 0, 0, 0, 0))
+                        (song_id, 2, 0, 0, 0, 0, 0, 0, 1, 0))
 
-                    cur.execute("""
-                    INSERT INTO MetronomeSettings (SongId, Sig1, Sig2, Subdivision, SoundFX, AccentFirst, AutoStart, CountIn, NumberCount, AutoTurn)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (song_id, 2, 0, 0, 0, 0, 0, 0, 1, 0))
+                        for i in range(file['pagecount']):
+                            cur.execute("""
+                            INSERT INTO MetronomeBeatsPerPage (SongId, Page, BeatsPerPage)
+                            VALUES (?, ?, ?)""",
+                            (song_id, i, 0))
 
-                    for i in range(file['pagecount']):
-                        cur.execute("""
-                        INSERT INTO MetronomeBeatsPerPage (SongId, Page, BeatsPerPage)
-                        VALUES (?, ?, ?)""",
-                        (song_id, i, 0))
+                        # cur.execute("""
+                        # INSERT INTO ZoomPerPage ()
+                        # VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        # (1, 0, 8000, 3, 1000, 20, 0, 2000))
 
-                    # Assume ID is correct here
-                    for i in range(len(setlists)):
-                        setlist = setlists[i]
-                        setlist_id = i+1 # 1-indexed
-                        found = False
-                        for setlist_song_idx in setlist['song_index']:
-                            if found:
-                                break
-                            setlist_song = songs[setlist_song_idx]
-                            for setlist_file in setlist_song['files']:
-                                if setlist_file['name'] == file['name']:
-                                    cur.execute("""
-                                    INSERT INTO SetlistSong (SetlistId, SongId)
-                                    VALUES (?, ?)""",
-                                    (setlist_id, song_id))
-                                    found = True
-                                    if args.verbose:
-                                        print("Inserting Song [green]" + file['name'] + "[/green] into setlist [cyan]" + setlist['name'], live=live)
-                                    break
+                        # Add line to hashcodes
+                        with open('output/'+part.replace(' ','_').lower() + '_hashcodes.txt', "a", encoding="utf-8") as f_out:
+                            f_out.write(f"{part_folders[part]['id']}/{file['name']}\n")
+                            f_out.write(f"{file['filehash']}\n")
+                            f_out.write(f"{file['modifiedTime']}\n")
+                            f_out.write(f"{file['size']}\n")
 
-                    # cur.execute("""
-                    # INSERT INTO ZoomPerPage ()
-                    # VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    # (1, 0, 8000, 3, 1000, 20, 0, 2000))
+            for i in range(len(setlists)):
+                setlist = setlists[i]
+                setlist_id = i+1 # 1-indexed
+                found = False
+                for setlist_song_idx in setlist['song_index']:
+                    setlist_song = songs[setlist_song_idx]
+                    if part in setlist_song['parts']:
+                        for setlist_file in setlist_song['parts'][part]:
+                            song_id = song_ids[setlist_song_idx][setlist_file['name']]
+                            cur.execute("""
+                            INSERT INTO SetlistSong (SetlistId, SongId)
+                            VALUES (?, ?)""",
+                            (setlist_id, song_id))
+                            found = True
+                            if args.verbose:
+                                print("Inserting Setlist Song [green]" + setlist_file['name'] + "[/green] into setlist [cyan]" + setlist['name'], live=live)
+            
+            conn.commit()
+            conn.close()
+            print(f"Finished assembling database. Added [cyan]{song_id}[/cyan] songs", live=live)
+            pop_log_section()
 
-                    # Add line to hashcodes
-                    with open('output/'+part.replace(' ','_').lower() + '_hashcodes.txt', "a", encoding="utf-8") as f_out:
-                        f_out.write(f"{part_folders[part]['id']}/{file['name']}\n")
-                        f_out.write(f"{file['filehash']}\n")
-                        f_out.write(f"{file['modifiedTime']}\n")
-                        f_out.write(f"{file['size']}\n")
-
-                conn.commit()
-                conn.close()
-        print("Finished assembling database!", live=live)
     pop_log_section()
     for instrument in used_instruments:
         db_name = instrument.replace(' ','_').lower() + '.db'
