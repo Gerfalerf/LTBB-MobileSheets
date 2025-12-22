@@ -13,6 +13,7 @@ import json
 import argparse
 import pathlib
 import webbrowser
+import tomli
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -25,6 +26,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.tree import Tree
 from rich.live import Live
+from rich.text import Text
 from dateutil import parser
 from PyPDF2 import PdfReader
 from threading import Lock
@@ -38,52 +40,24 @@ arg_parser.add_argument('--verbose', action="store_true", help="Spit out extra i
 arg_parser.add_argument('--dedupe', action="store_true", help="For use when a part folder accidentally ends up with multiple copies of the same file. Shouldn't happen.") 
 args = arg_parser.parse_args()
 
+config = None
+with open("config.toml", "rb") as f:
+    config = tomli.load(f)
+
 # Relevant Google Drive folders - TODO read this from a .ini file instead
-WEEKLY_AGENDA_ID = "1jcazpKFV5wNjzDY-3oC9BKei_3iVQhrQ6xy3P76G-5w"
-MEMORIZATION_LIST_ID = "1lYz54_jarIxfqZu0vVebfcRIBykGsikdSs3QNhlecU0" # TODO - this just links to mp3s, not song folders, maybe remove
-DEST_MUSIC_FOLDER = "1h-T2mnFrr0VpafBDJ3nv3vvO_xLGir9t" # The folder where the MobileSheets database and PDFs will end up
-SRC_MUSIC_FOLDER = "12y2cjGE7GE3MTJ8QtNs3_Z5L30o5Ql6D" # The LTBB folder containing all the sheet music. Currently organized in folders like 'A-C', 'D-F', etc
-SEASONAL_SONGS = "1M7sLr9wwvHJIfKGijRTSjC5ae1CODzbY" # Some subfolders that contain additional songs not in the alphabetic folders
-DRIVE_ID = "0AIscw8ywGnshUk9PVA" # Quirk of using a Shared Drive, we sometimes need this
-IGNORE_FOLDERS = ['1. Member Drafts', '2. Seasonal Songs', '3. Warm-ups', '4. 3rd Rail Drumline', '5. Resources', '6. Recordings']
+WEEKLY_AGENDA_ID = config["drive_settings"]["Weekly_Agenda_ID"]
+SRC_MUSIC_FOLDER = config["drive_settings"]["Source_Music_Folder"] # The LTBB folder containing all the sheet music. Currently organized in folders like "A-C", "D-F", etc
+DEST_MUSIC_FOLDER = config["drive_settings"]["Destination_Music_Folder"] # The folder where the MobileSheets database and PDFs will end up
+SEASONAL_SONGS = config["drive_settings"]["Seasonal_Songs"] # Some subfolders that contain additional songs not in the alphabetic folders
+DRIVE_ID = config["drive_settings"]["Drive_ID"] # Quirk of using a Shared Drive, we sometimes need this
+IGNORE_FOLDERS = config["drive_settings"]["Ignore_Folders"]
+EXCEPTION_PARTS = config["exceptions"]
 MAX_SONGS = 99999
 
 # Instrumentation - this could also possibly move to a .ini folder
-INSTRUMENTS = {
-    'Score': ['Score'],
-    'Tuba': ['Tuba', 'Sousaphone', 'Sousa', 'Low Brass', 'Basses', 'Bass (Treble Clef)', 'Bass_Line'],
-    'Horn': ['Horn in F', 'F Horn', 'Mellophone', 'Horns F'],
-    'Percussion': ['Percussion', 'Drum', 'Snareline', 'Perc', 'BassDr', 'Snare', 'Congo', 'Toms', 'Quads', 'Cymbal', 'Glockenspiel'],
-    'Clarinet': ['Clarinet', 'Bb Sopranos'],
-    'Soprano Sax': ['Soprano'],
-    'Alto Sax': ['Alto'],
-    'Tenor Sax': ['Tenor'],
-    'Bari Sax': ['Bari'],
-    'Bass Sax': ['Bass Sax', 'Bass Saxophone'],
-    'Trumpet': ['Trumpet', 'Flugelhorn', 'Trmp', 'Trumplet'],
-    'Trombone': ['Trombone', 'Tbn', 'Trmb', 'Bone', 'Low Brass'],
-    'Eb Horn' : ['Eb Horn', 'Horn in Eb'],
-    'Flute' : ['Flute', 'C Woodwind'],
-    'Euph' : ['Euphonium', 'Euph']
-}
-# Does your instrument not have a part for this song? Use a backup!
-BACKUP_INSTRUMENTS = {
-    'Score': [],
-    'Tuba': ['Bass Clef Instruments'],
-    'Horn': ['F Treble Clef Instruments', 'Horn'], # Horn included here so we don't accidentally pick up a zillion Eb Horns without at least trying things like 'Horn in F' first
-    'Percussion': [],
-    'Clarinet': ['Bb Treble Clef Instruments'],
-    'Soprano Sax': ['Bb Treble Clef Instruments', 'Tenor Sax'],
-    'Alto Sax': ['Eb Treble Clef Instruments'],
-    'Tenor Sax': ['Bb Treble Clef Instruments'],
-    'Bari Sax': ['Eb Treble Clef Instruments'],
-    'Bass Sax': ['Bb Treble Clef Instruments', 'Tuba'],
-    'Trumpet': ['Bb Treble Clef Instruments'],
-    'Trombone': ['Bass Clef Instruments'],
-    'Eb Horn' : ['Eb Treble Clef Instruments', 'Bari Sax'],
-    'Flute' : ['C Treble Clef Instruments'],
-    'Euph' : ['Eb Treble Clef Instruments', 'Tenor Sax']
-}
+INSTRUMENTS = config["instrumentation"]["instruments"]
+BACKUP_INSTRUMENTS = config["instrumentation"]["backup_instruments"]
+SOLO_PARTS = config["instrumentation"]["solo_parts"]
 INSTRUMENT_LOOKUP = {}
 for main in INSTRUMENTS:
     for sub in INSTRUMENTS[main]:
@@ -114,18 +88,24 @@ docs = build("docs", "v1", credentials=creds)
 drive = build("drive", "v3", credentials=creds)
 
 # Globals for logging
-def my_log_print(*args, print_to_std_out=True, save_to_file=True, live=None, **kwargs):
+def my_log_print(*args, print_to_std_out=True, save_to_file=True, live=None, rule=False, **kwargs):
     s = log_indent + stringify_print(*args, **kwargs).rstrip('\n')
     if live:
         live.update(s)
     elif print_to_std_out:
-        console.print(s, highlight=False)
+        if rule:
+            console.rule(s)
+        else:
+            console.print(s, highlight=False, width=None, soft_wrap=True)
     if save_to_file:
-        file_console.print(s, highlight=False)
+        if rule:
+            file_console.rule(s)
+        else:
+            file_console.print(s, highlight=False, width=None, soft_wrap=True)
 log_indent = ''
 error_log = []
-console = Console(record=True)
-file_console = Console(record=True, file=io.StringIO())
+console = Console(record=True, width=None, force_terminal=True)
+file_console = Console(record=True, file=io.StringIO(), width=None, force_terminal=True)
 og_print = builtins.print
 builtins.print = my_log_print
 
@@ -140,8 +120,13 @@ def main():
 
     # Assemble song list
     songs = []
-    cache = load_dict('cache/cache.json')
-    push_log_section('[cyan]Querying LTBB Drive')
+    push_log_section('[cyan]Querying LTBB Drive', rule=True)
+
+    cache = None
+    try:    
+        cache = load_dict('cache/cache.json')
+    except json.decoder.JSONDecodeError as e:
+        cache = None
     if args.skipquery and cache and 'songs' in cache and 'setlists' in cache:
         # For inner dev loop, we can skip the query of the google drive folders and docs
         print('[cyan]Loading songs from cached file!')
@@ -152,25 +137,23 @@ def main():
         songs = query_tree([SRC_MUSIC_FOLDER, SEASONAL_SONGS])
         remove_duplicate_dicts(songs)
         # Read the rehearsal schedule, modify songs if needed
-        # TODO - memorization list actually does not link to any sheet music
         setlists = query_setlist_docs({"Rehearsal": WEEKLY_AGENDA_ID}, songs)
-    pop_log_section()
+        # Cache the result of the queries for inner dev loop
+        os.makedirs('cache', exist_ok=True)
+        os.makedirs('output', exist_ok=True)
+        save_dict('cache/cache.json', {'songs':songs, 'setlists':setlists})
+    pop_log_section(rule=True)
     print("[cyan]Done querying!")
     time.sleep(1)
 
-    # Cache the result of the queries for inner dev loop
-    os.makedirs('cache', exist_ok=True)
-    os.makedirs('output', exist_ok=True)
-    save_dict('cache/cache.json', {'songs':songs, 'setlists':setlists})
-
     # Figure out the instrumentation from each songs' filenames
     print()
-    push_log_section('[cyan]Assembling part information')
+    push_log_section('[cyan]Assembling part information', rule=True)
     for song in songs:
         push_log_section("Instrumentation for [green]" + song['name'])
         assemble_song_parts(song)
         pop_log_section()
-    pop_log_section()
+    pop_log_section(rule=True)
     print("[cyan]Part information assembled!")
 
     # Warn about files missing instruments
@@ -188,7 +171,7 @@ def main():
 
     # Find destination part Drive folder IDs and existing files
     print()
-    push_log_section("[cyan]Querying destination part folders...")
+    push_log_section("[cyan]Querying destination part folders...", rule=True)
     part_folders = {}
     for part in INSTRUMENTS:
         push_log_section("Finding part folder [magenta]" + part)
@@ -197,30 +180,30 @@ def main():
         part_folders[part] = folder
         print("Found " + str(len(folder['files'])) + " existing PDFs")
         pop_log_section()
-    pop_log_section()
+    pop_log_section(rule=True)
 
     # Dedupe files in the Google Drive (shouldn't need to happen)
     if args.dedupe:
-        push_log_section("[cyan]Deduping files, because somehow Geoffrey ended up getting multiple copies of the same PDF into a part folder.")
+        push_log_section("[cyan]Deduping files, because somehow Geoffrey ended up getting multiple copies of the same PDF into a part folder.", rule=True)
         for part in part_folders:
             dedupe_files(part_folders[part])
-        pop_log_section()
+        pop_log_section(rule=True)
 
     # Copy files from Src drive folder to Destination drive folder 
     # Skips if the Src song is not newer than the Dest song
     print()
-    push_log_section('[cyan]Copying songs from source folders into destination part folders...')
+    push_log_section('[cyan]Copying songs from source folders into destination part folders...', rule=True)
     copy_songlist_into_drive(songs, part_folders)
-    pop_log_section()
+    pop_log_section(rule=True)
     print('[cyan]Songs copied into Drive!')
     time.sleep(1)
         
     # Update MobileSheets Database and upload
     print()
-    push_log_section("[cyan]Updating databases...")
+    push_log_section("[cyan]Updating databases...", rule=True)
     if not args.skipupload:
         update_database(songs, setlists, part_folders)
-    pop_log_section()
+    pop_log_section(rule=True)
     print("[cyan]Database updated!")
     time.sleep(1)
 
@@ -244,14 +227,18 @@ def main():
     # Print errors
     if error_log:
         print()
-        print("[cyan]The following warnings/errors occured:")
+        print("[cyan]The following warnings/errors occured:", rule=True)
         for error in error_log:
             print(error)
+    else:
+        print("0 warnings or errors, great job!")
 
 def get_song_preferred_names(songs):
     possible_instruments = [key.lower().replace(' ', '_') for key in INSTRUMENT_LOOKUP]
     for key in BACKUP_INSTRUMENTS:
         possible_instruments.extend([word.lower().replace(' ', '_') for word in BACKUP_INSTRUMENTS[key]])
+    for key in SOLO_PARTS:
+        possible_instruments.extend([word.lower().replace(' ', '_') for word in SOLO_PARTS[key]])
     for song in songs:
         for file in song['files']:
             # Figure out if the file name starts with an instrument
@@ -281,14 +268,16 @@ def error(message, silent=False, crash=False):
     if crash:
         print(5 / 0)
 
-def push_log_section(section_name, live=None, save_to_file=True):
-    print(section_name, live=live, save_to_file=save_to_file)
-    global log_indent
-    log_indent += '    '
+def push_log_section(section_name, live=None, save_to_file=True, rule=False):
+    print(section_name, live=live, save_to_file=save_to_file, rule=rule)
+    if not rule:
+        global log_indent
+        log_indent += '    '
 
-def pop_log_section():
-    global log_indent
-    log_indent = log_indent[:-4]
+def pop_log_section(rule=False):
+    if not rule:
+        global log_indent
+        log_indent = log_indent[:-4]
 
 def stringify_print(*args, highlight=False, **kwargs):
     buf = io.StringIO()
@@ -483,8 +472,8 @@ def assemble_song_parts(song):
             for backup_part in BACKUP_INSTRUMENTS[part_key]:
                 # Directly take the part if it's in there
                 if backup_part in song['parts']:
-                    song['parts'][part_key] = song['parts'][backup_part]
-                    print("[magenta]" + part_key + "[/magenta] using backup part [green]" + str([file['name'] for file in song['parts'][backup_part]]))
+                    song['parts'][part_key] = [file for file in song['parts'][backup_part]]
+                    print("[magenta]" + part_key + "[/magenta] copying backup instrument [green]" + str([file['name'] for file in song['parts'][backup_part]]))
                     break
                 else:
                     # The backup part might be something werid like "Bb Treble Clef Instruments", so do another filename test
@@ -493,14 +482,21 @@ def assemble_song_parts(song):
                             song['parts'][part_key] = [file]
                             print("[magenta]" + part_key + "[/magenta] using backup part [green]" + file['name'])
                             found = True
-                            break
                     if found:
                         break
             if part_key not in song['parts'] and part_key not in ['Flute', 'Percussion', 'Score']:
                 warn("No part file found for instrument [magenta]" + part_key + "[/magenta] for song [green]" + song['name'])
 
-
-
+    # Solo parts
+    for part_key in INSTRUMENTS: # Tenor Sax, etc
+        for file in files: # file['name'] = "Soloist (Bb) - Valerie.pdf", etc
+            for solo_part in SOLO_PARTS[part_key]: # Soloist (Bb), etc
+                if filename_contains(file['name'], solo_part):
+                    print("[magenta]" + part_key + "[/magenta] using soloist part [green]" + file['name'])
+                    if part_key not in song['parts']:
+                        song['parts'][part_key] = []
+                    song['parts'][part_key].append(file)
+                    
     for file in song['files']:
         found = False
         for part_key in song['parts']:
@@ -520,6 +516,9 @@ def extract_parts_from_filename(file_name):
     for possible_instrument in INSTRUMENT_LOOKUP:
         if filename_contains(file_name, possible_instrument) and INSTRUMENT_LOOKUP[possible_instrument] not in instruments:
             instruments.append(INSTRUMENT_LOOKUP[possible_instrument])
+    for part_key in INSTRUMENTS:
+        if part_key in EXCEPTION_PARTS and file_name in EXCEPTION_PARTS[part_key]:
+            instruments.append(part_key)
     return instruments
 
 # Gets a Google Drive folder name from its ID
@@ -986,11 +985,11 @@ def update_database(songs, setlists, part_folders):
                     setlist_song = songs[setlist_song_idx]
                     if part in setlist_song['parts']:
                         for setlist_file in setlist_song['parts'][part]:
-                            song_id = song_ids[setlist_song_idx][setlist_file['name']]
+                            ref_song_id = song_ids[setlist_song_idx][setlist_file['name']]
                             cur.execute("""
                             INSERT INTO SetlistSong (SetlistId, SongId)
                             VALUES (?, ?)""",
-                            (setlist_id, song_id))
+                            (setlist_id, ref_song_id))
                             found = True
                             if args.verbose:
                                 print("Inserting Setlist Song [green]" + setlist_file['name'] + "[/green] into setlist [cyan]" + setlist['name'], live=live)
